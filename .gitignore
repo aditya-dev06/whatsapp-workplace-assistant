@@ -1,0 +1,21 @@
+# Virtual Environment
+venv/
+.venv/
+env/
+
+# Python Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Local Configurations & Database States
+.env
+database.json
+
+# Private Security grievance logs
+escalations_log.txt
+
+# System Generated Logs
+.system_generated/
