@@ -31,6 +31,16 @@ class DatabaseHelper:
         data = self._load_data()
         return data.get("employees", {}).get(phone_number)
 
+    def get_employee_by_name(self, name: str) -> Optional[tuple[str, Dict[str, Any]]]:
+        """
+        Looks up an employee by their name (case-insensitive) and returns (phone_number, employee_data).
+        """
+        data = self._load_data()
+        for phone, emp in data.get("employees", {}).items():
+            if emp.get("name", "").lower() == name.lower():
+                return phone, emp
+        return None
+
     def update_employee(self, phone_number: str, employee_data: Dict[str, Any]) -> bool:
         data = self._load_data()
         if "employees" not in data:

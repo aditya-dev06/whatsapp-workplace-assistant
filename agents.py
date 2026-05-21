@@ -9,8 +9,8 @@ from database_helper import db
 # Define system prompts for each specialized agent
 
 CHORES_PROMPT = """
-You are the Chores Agent, an objective corporate assistant specializing in managing leaves, official text formatting, and email drafting.
-An employee is interacting with you. Your job is to draft clean, professional emails or leave notes based on their input.
+You are the Chores Agent, an objective corporate assistant specializing in managing leaves, official text formatting, email drafting, and secure coworker notifications.
+An employee is interacting with you. Your job is to draft clean, professional emails or leave notes, or format messages to other employees based on their input.
 
 If the user is applying for a leave:
 1. Parse the number of days, start date, and end date if provided.
@@ -24,6 +24,10 @@ Return this JSON block at the end:
 If the user is completing a task:
 Return this JSON block at the end:
 [ACTION_JSON]{"action": "complete_task", "task_id": <int>}
+
+If the user is asking to send a message, note, or notify another employee/person registered in the database (e.g. tell Mom that...):
+Return this JSON block at the end:
+[ACTION_JSON]{"action": "send_message", "recipient_name": "<name of the recipient, e.g., Mom>", "message_content": "<content of the message/notification>"}
 
 Ensure your text response is concise, extremely professional, and ready to be forwarded on WhatsApp.
 """
@@ -165,7 +169,7 @@ class AgentCoordinator:
         Regex-based rule router for fast, offline testing.
         """
         text_lower = text.lower()
-        if any(w in text_lower for w in ["leave", "vacation", "off", "holiday", "add task", "complete task", "finish task"]):
+        if any(w in text_lower for w in ["leave", "vacation", "off", "holiday", "add task", "complete task", "finish task", "tell ", "message ", "send to "]):
             return "CHORES"
         elif any(w in text_lower for w in ["status", "update", "workload", "burnout", "stress", "tasks"]):
             return "WORKLOAD"
@@ -184,7 +188,7 @@ class AgentCoordinator:
         # LLM-based classification prompt
         system_router_prompt = (
             "You are a router agent. Classify the user's incoming corporate message into exactly one category:\n"
-            "- CHORES: If they want to apply/log leaves, write/format an email, add a task, or mark a task as completed.\n"
+            "- CHORES: If they want to apply/log leaves, write/format an email, add a task, mark a task as completed, or send/forward a message/notification to another registered employee.\n"
             "- WORKLOAD: If they want to check their tasks status, workload index, burnout, stress levels, or ask 'status update'.\n"
             "- ESCALATION: If they are making a complaint, grievance, reporting toxic behavior, expressing extreme distress/harassment.\n"
             "- GENERAL: For standard greetings like hi, hello, help, or unknown requests.\n"
@@ -208,7 +212,7 @@ class AgentCoordinator:
         # LLM execution
         user_context = f"Employee Profile: {employee}\nRequest: {text}"
         response = await call_llm(CHORES_PROMPT, user_context)
-        return cls._execute_action_json(phone, response)
+        return await cls._execute_action_json(phone, response, employee)
 
     @classmethod
     async def process_workload(cls, phone: str, text: str, employee: Dict[str, Any]) -> str:
@@ -227,13 +231,13 @@ class AgentCoordinator:
         # LLM execution
         user_context = f"Employee Profile: {employee}\nGrievance: {text}"
         response = await call_llm(ESCALATOR_PROMPT, user_context)
-        return cls._execute_action_json(phone, response)
+        return await cls._execute_action_json(phone, response, employee)
 
     # --- ACTION EXECUTION HELPER ---
-    @staticmethod
-    def _execute_action_json(phone: str, response: str) -> str:
+    @classmethod
+    async def _execute_action_json(cls, phone: str, response: str, employee: Dict[str, Any] = None) -> str:
         """
-        Parses action JSON appended by agents, updates DB, and cleans the text response.
+        Parses action JSON appended by agents, updates DB, sends Twilio notifications, and cleans response.
         """
         if "[ACTION_JSON]" not in response:
             return response
@@ -279,6 +283,41 @@ class AgentCoordinator:
                         f.write(f"[{timestamp}] Sanitized Grievance:\n{sanitized_text}\n\n")
                     clean_text += "\n\n🟢 *Privacy Confirmation:* Gripes securely scrubbed, anonymized, and logged in escalations_log.txt. No identification metrics retained."
                     
+            elif action == "send_message":
+                recipient_name = action_data.get("recipient_name", "")
+                message_content = action_data.get("message_content", "")
+                
+                lookup = db.get_employee_by_name(recipient_name)
+                if not lookup:
+                    clean_text += f"\n\n🔴 *System Error:* Could not find any registered employee named '{recipient_name}' in database.json."
+                else:
+                    rec_phone, rec_data = lookup
+                    sender_name = employee.get("name", "Aditya Prakash") if employee else "A Coworker"
+                    
+                    if settings.TWILIO_ACCOUNT_SID and settings.TWILIO_AUTH_TOKEN:
+                        try:
+                            url = f"https://api.twilio.com/2010-04-01/Accounts/{settings.TWILIO_ACCOUNT_SID}/Messages.json"
+                            auth = (settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
+                            data = {
+                                "From": settings.TWILIO_FROM_NUMBER,
+                                "To": rec_phone,
+                                "Body": f"📩 *Secure message from {sender_name}:*\n\n{message_content}"
+                            }
+                            async with httpx.AsyncClient(timeout=10.0) as client:
+                                res = await client.post(url, auth=auth, data=data)
+                                if res.status_code in [200, 201]:
+                                    clean_text += f"\n\n🟢 *System Log:* Successfully sent live WhatsApp message to {recipient_name} ({rec_phone})!"
+                                else:
+                                    clean_text += f"\n\n🔴 *Twilio Delivery Error:* Status code {res.status_code} - {res.text}"
+                        except Exception as ex:
+                            clean_text += f"\n\n🔴 *Twilio Transport Error:* {str(ex)}"
+                    else:
+                        clean_text += (
+                            f"\n\n🟢 *Action Simulated:* Found employee *{recipient_name}* ({rec_phone})!\n"
+                            f"📝 *Drafted Message:* \"_{message_content}_\"\n"
+                            f"⚠️ *Twilio Notice:* To send this message live, please set `TWILIO_ACCOUNT_SID` and `TWILIO_AUTH_TOKEN` in your `.env` file, and ensure the recipient has joined the Sandbox."
+                        )
+                        
         except Exception as e:
             # Fallback silently but note in clean_text during debugging
             clean_text += f"\n\n⚠️ *System Alert:* Action processing encountered an issue: {str(e)}"
@@ -290,6 +329,52 @@ class AgentCoordinator:
     def _process_chores_mock(phone: str, text: str, employee: Dict[str, Any]) -> str:
         text_lower = text.lower()
         
+        # Send message Mock
+        send_match = re.search(r'(?:tell|message|send to)\s+([a-zA-Z0-9_\-\s]+?)\s+(?:to|that|:)\s+(.+)', text, re.IGNORECASE)
+        if not send_match:
+            send_match = re.search(r'(?:tell|message|send to)\s+([a-zA-Z0-9_\-\s]+?)\s+(.+)', text, re.IGNORECASE)
+            
+        if send_match:
+            recipient_name = send_match.group(1).strip()
+            message_content = send_match.group(2).strip()
+            message_content = re.sub(r'^(?:to|that|:)\s+', '', message_content, flags=re.IGNORECASE)
+            
+            lookup = db.get_employee_by_name(recipient_name)
+            if not lookup:
+                return f"🔴 *System Error:* Could not find any registered employee named '{recipient_name}' in database.json."
+            
+            rec_phone, rec_data = lookup
+            sender_name = employee.get("name", "Aditya Prakash")
+            
+            if settings.TWILIO_ACCOUNT_SID and settings.TWILIO_AUTH_TOKEN:
+                try:
+                    import httpx
+                    url = f"https://api.twilio.com/2010-04-01/Accounts/{settings.TWILIO_ACCOUNT_SID}/Messages.json"
+                    auth = (settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
+                    data = {
+                        "From": settings.TWILIO_FROM_NUMBER,
+                        "To": rec_phone,
+                        "Body": f"📩 *Secure message from {sender_name}:*\n\n{message_content}"
+                    }
+                    res = httpx.post(url, auth=auth, data=data, timeout=10.0)
+                    if res.status_code in [200, 201]:
+                        return (
+                            f"### Secure Workplace Messaging\n\n"
+                            f"Message dispatched successfully to *{recipient_name}* ({rec_phone}) via Twilio.\n\n"
+                            f"🟢 *System Log:* Outbound WhatsApp message sent!"
+                        )
+                    else:
+                        return f"🔴 *Twilio Delivery Error:* Status code {res.status_code} - {res.text}"
+                except Exception as ex:
+                    return f"🔴 *Twilio Transport Error:* {str(ex)}"
+            else:
+                return (
+                    f"### Secure Workplace Messaging (Simulated)\n\n"
+                    f"Found employee *{recipient_name}* ({rec_phone}) in database.\n\n"
+                    f"📝 *Drafted Message:* \"_{message_content}_\"\n\n"
+                    f"⚠️ *Twilio Notice:* To send this message live, please set `TWILIO_ACCOUNT_SID` and `TWILIO_AUTH_TOKEN` in your `.env` file, and ensure the recipient has joined the Sandbox."
+                )
+
         # Complete Task Mock
         if "complete task" in text_lower:
             match = re.search(r'complete task\s+(\d+)', text_lower)
