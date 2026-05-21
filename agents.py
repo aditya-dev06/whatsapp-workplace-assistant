@@ -54,9 +54,48 @@ You MUST append the sanitized text at the end using this JSON block:
 
 async def call_llm(system_prompt: str, user_prompt: str) -> str:
     """
-    Stateless, secure LLM client supporting both Cloud OpenAI and Local Ollama.
+    Stateless, secure LLM client supporting Cloud Gemini, Cloud OpenAI, and Local Ollama.
     """
-    if settings.AGENT_MODE == "openai":
+    if settings.AGENT_MODE == "gemini":
+        if not settings.GEMINI_API_KEY:
+            return "Error: Gemini API Key is missing in configurations. Please set it in your .env file."
+        
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.GEMINI_MODEL}:generateContent?key={settings.GEMINI_API_KEY}"
+        headers = {
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "systemInstruction": {
+                "parts": [
+                    {"text": system_prompt}
+                ]
+            },
+            "contents": [
+                {
+                    "parts": [
+                        {"text": user_prompt}
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.3
+            }
+        }
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(url, headers=headers, json=payload)
+                if response.status_code == 200:
+                    result = response.json()
+                    try:
+                        return result["candidates"][0]["content"]["parts"][0]["text"]
+                    except (KeyError, IndexError):
+                        return f"Error: Failed to parse Gemini API response structure. Full response: {result}"
+                else:
+                    return f"Error: Gemini API returned status code {response.status_code} - {response.text}"
+        except Exception as e:
+            return f"Error connecting to Gemini API: {str(e)}"
+
+    elif settings.AGENT_MODE == "openai":
         if not settings.OPENAI_API_KEY:
             return "Error: OpenAI API Key is missing in configurations. Please set it in your .env file."
         

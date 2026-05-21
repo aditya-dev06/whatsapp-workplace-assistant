@@ -84,12 +84,23 @@ async def whatsapp_webhook(
         elif intent == "ESCALATION":
             raw_reply = await AgentCoordinator.process_escalation(sender_phone, incoming_text, employee)
         else:
-            # Fallback to standard dialogue using mock/chores behavior
-            raw_reply = (
-                f"I processed your message as a general request:\n\n"
-                f"\"{incoming_text}\"\n\n"
-                f"For direct commands, please see the *menu* by texting *help*."
-            )
+            # Smart conversational fallback using dynamic LLM reasoning if enabled
+            if settings.AGENT_MODE != "mock":
+                from agents import call_llm
+                system_general_prompt = (
+                    f"You are the General Assistance module for the secure workplace assistant. "
+                    f"You are speaking with {employee.get('name')} ({employee.get('role')}). "
+                    f"Answer their questions, help them drafts templates or notes, or chat with them nicely. "
+                    f"If they want to apply for leave, check workload status, or file a complaint, "
+                    f"mention that they can also use those direct actions anytime."
+                )
+                raw_reply = await call_llm(system_general_prompt, incoming_text)
+            else:
+                raw_reply = (
+                    f"I processed your message as a general request:\n\n"
+                    f"\"{incoming_text}\"\n\n"
+                    f"For direct commands, please see the *menu* by texting *help*."
+                )
             
     except Exception as e:
         raw_reply = f"⚠️ *Internal Error:* We encountered a problem processing your request: {str(e)}"
